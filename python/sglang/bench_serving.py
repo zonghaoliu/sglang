@@ -13,6 +13,7 @@ python3 -m sglang.bench_serving --backend sglang --dataset-name random --num-pro
 import argparse
 import asyncio
 import copy
+import csv
 import importlib.util
 import io
 import json
@@ -78,6 +79,32 @@ def _create_bench_client_session():
         timeout=aiohttp_timeout, read_bufsize=BENCH_AIOHTTP_READ_BUFSIZE_BYTES
     )
 
+def _get_memory_info_mb() -> Tuple[float, float]:
+    """Get system RAM usage and GPU memory usage in MB.
+
+    Returns:
+        Tuple[system_ram_used_mb, gpu_used_mb]
+    """
+    # --- System RAM usage ---
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        system_ram_used_mb = vm.used / 1024 / 1024
+    except Exception:
+        system_ram_used_mb = 0.0
+
+    # --- GPU memory usage (CUDA API) ---
+    gpu_used_mb = 0.0
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            used_bytes = total_bytes - free_bytes
+            gpu_used_mb = used_bytes / 1024 / 1024
+    except Exception:
+        pass
+
+    return system_ram_used_mb, gpu_used_mb
 
 @dataclass
 class RequestFuncInput:
@@ -105,6 +132,9 @@ class RequestFuncOutput:
     error: str = ""
     output_len: int = 0
     start_time: float = 0.0
+
+    cpu_memory_mb: float = 0.0
+    gpu_memory_mb: float = 0.0
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -673,6 +703,10 @@ async def async_request_sglang_generate(
                     output.success = True
                     output.latency = latency
                     output.output_len = output_len
+
+                    output.cpu_memory_mb, output.gpu_memory_mb = (
+                        _get_memory_info_mb()
+                    )
                 else:
                     output.error = (
                         (response.reason or "") + ": " + (await response.text())
@@ -2052,6 +2086,100 @@ async def get_request(
             await asyncio.sleep(interval)
 
 
+def _save_metrics_to_csv(
+    outputs: List[RequestFuncOutput],
+    ttfts: List[float],
+    tpots: List[float],
+    itls: List[float],
+    e2e_latencies: List[float],
+    output_lens: List[int],
+    csv_save_dir: str,
+    min_start_time: float,
+    tokens_per_second: np.ndarray,
+    input_token_throughput: float,
+    output_token_throughput: float,
+    duration_seconds: int,
+    cpu_memory_usages: List[float],
+    gpu_memory_usages: List[float]
+) -> None:
+    """
+    Save metrics to CSV files.
+    """
+    try:
+        os.makedirs(csv_save_dir, exist_ok=True)
+    except Exception as e:
+        print(f"Failed to create directory {csv_save_dir}: {e}")
+        return
+    
+    # 1. Save throughput over time
+    try:
+        throughput_file = os.path.join(csv_save_dir, "throughput_over_time.csv")
+        with open(throughput_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["time_second", "output_tokens_per_second", "input_tokens_per_second"])
+            for second in range(len(tokens_per_second)):
+                # Approximate input throughput based on average
+                input_tokens_sec = input_token_throughput if input_token_throughput > 0 else 0
+                writer.writerow([second, tokens_per_second[second], input_tokens_sec])
+    except Exception as e:
+        print(f"Failed to save throughput_over_time.csv: {e}")
+    
+    # 2. Save TTFT (Time to First Token)
+    try:
+        ttft_file = os.path.join(csv_save_dir, "ttft.csv")
+        with open(ttft_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["request_idx", "ttft_ms"])
+            for idx, ttft in enumerate(ttfts):
+                writer.writerow([idx, ttft * 1000])  # Convert to ms
+    except Exception as e:
+        print(f"Failed to save ttft.csv: {e}")
+    
+    # 3. Save TPOT (Time Per Output Token)
+    try:
+        tpot_file = os.path.join(csv_save_dir, "tpot.csv")
+        with open(tpot_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["request_idx", "tpot_ms"])
+            for idx, tpot in enumerate(tpots):
+                writer.writerow([idx, tpot * 1000])  # Convert to ms
+    except Exception as e:
+        print(f"Failed to save tpot.csv: {e}")
+    
+    # 4. Save ITL (Inter-Token Latency)
+    try:
+        itl_file = os.path.join(csv_save_dir, "itl.csv")
+        with open(itl_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["token_idx", "itl_ms"])
+            for idx, itl_val in enumerate(itls):
+                writer.writerow([idx, itl_val * 1000])  # Convert to ms
+    except Exception as e:
+        print(f"Failed to save itl.csv: {e}")
+    
+    # 5. Save E2E Latency (End-to-End)
+    try:
+        e2e_file = os.path.join(csv_save_dir, "e2e_latency.csv")
+        with open(e2e_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["request_idx", "e2e_latency_ms", "output_tokens"])
+            for idx, (e2e_lat, output_len) in enumerate(zip(e2e_latencies, output_lens)):
+                writer.writerow([idx, e2e_lat * 1000, output_len])  # Convert to ms
+    except Exception as e:
+        print(f"Failed to save e2e_latency.csv: {e}")
+    
+    # 6. Save memory usage over time
+    try:
+        memory_file = os.path.join(csv_save_dir, "memory_usage.csv")
+        with open(memory_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["request_idx", "cpu_memory_mb", "gpu_memory_mb"])
+            for idx, (cpu_mem, gpu_mem) in enumerate(zip(cpu_memory_usages, gpu_memory_usages)):
+                writer.writerow([idx, cpu_mem, gpu_mem])
+    except Exception as e:
+        print(f"Failed to save memory_usage.csv: {e}")
+
+
 def calculate_metrics(
     input_requests: Optional[List[DatasetRow]],
     outputs: List[RequestFuncOutput],
@@ -2060,6 +2188,7 @@ def calculate_metrics(
     backend: str,
     accept_length: Optional[float] = None,
     plot_throughput: bool = False,
+    csv_save_dir: Optional[str] = None,
 ) -> Tuple[BenchmarkMetrics, List[int]]:
     output_lens: List[int] = []
     retokenized_output_lens: List[int] = []
@@ -2072,6 +2201,8 @@ def calculate_metrics(
     ttfts: List[float] = []
     e2e_latencies: List[float] = []
     retokenized_itls: List[float] = []
+    cpu_memory_usages: List[float] = []
+    gpu_memory_usages: List[float] = []
 
     use_retokenized_itl = (
         accept_length is not None
@@ -2108,6 +2239,9 @@ def calculate_metrics(
 
             e2e_latencies.append(outputs[i].latency)
 
+            cpu_memory_usages.append(outputs[i].cpu_memory_mb)
+            gpu_memory_usages.append(outputs[i].gpu_memory_mb)
+
             completed += 1
         else:
             output_lens.append(0)
@@ -2122,6 +2256,11 @@ def calculate_metrics(
 
     max_output_tokens_per_s = 0.0
     max_concurrent_requests = 0
+
+    # Initialize variables for CSV export
+    tokens_per_second = np.array([])
+    duration_seconds = 0
+    min_start_time = 0
 
     successful_outputs = [output for output in outputs if output.success]
     if successful_outputs:
@@ -2223,6 +2362,25 @@ def calculate_metrics(
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
     )
+
+    # Save metrics to CSV files if directory is specified
+    if csv_save_dir:
+        _save_metrics_to_csv(
+            outputs=outputs,
+            ttfts=ttfts,
+            tpots=tpots,
+            itls=itls,
+            e2e_latencies=e2e_latencies,
+            output_lens=output_lens,
+            csv_save_dir=csv_save_dir,
+            min_start_time=min(output.start_time for output in successful_outputs) if successful_outputs else 0,
+            tokens_per_second=tokens_per_second if successful_outputs else np.array([]),
+            input_token_throughput=metrics.input_throughput,
+            output_token_throughput=metrics.output_throughput,
+            duration_seconds=duration_seconds if successful_outputs else 0,
+            cpu_memory_usages=cpu_memory_usages,
+            gpu_memory_usages=gpu_memory_usages,
+        )
 
     return metrics, output_lens
 
@@ -2524,6 +2682,10 @@ async def benchmark(
 
     # Compute metrics and print results
     benchmark_duration = time.perf_counter() - benchmark_start_time
+    
+    # Prepare CSV save directory if output file is specified
+    csv_save_dir = os.path.join(".", "output")
+    
     metrics, output_lens = calculate_metrics(
         input_requests=None if is_multi_turn else input_requests,
         outputs=outputs,
@@ -2532,6 +2694,7 @@ async def benchmark(
         backend=backend,
         accept_length=accept_length,
         plot_throughput=args.plot_throughput,
+        csv_save_dir=csv_save_dir,
     )
 
     print("\n{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
