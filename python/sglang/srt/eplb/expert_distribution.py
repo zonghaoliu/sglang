@@ -545,8 +545,7 @@ class _BufferedDetailSinglePassGatherer(_SinglePassGatherer):
         assert self._metadata is None
         self._num_tokens = forward_batch.input_ids.shape[0]
         self._metadata = dict(
-            # TODO pr-chain
-            # rids=forward_batch.rids,
+            rids=forward_batch.req_ids,
             input_ids=self._data.store(forward_batch.input_ids),
             positions=self._data.store(forward_batch.positions),
             extend_seq_lens=forward_batch.extend_seq_lens_cpu,
