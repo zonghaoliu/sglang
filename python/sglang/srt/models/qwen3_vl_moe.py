@@ -112,13 +112,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             deepstack_embeds = self.get_deepstack_embeds(
                 layer_idx - 1, input_deepstack_embeds
             )
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                forward_batch,
-                residual,
-                post_residual_addition=deepstack_embeds,
-            )
+            with get_global_expert_distribution_recorder().with_current_layer(layer_idx):
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    forward_batch,
+                    residual,
+                    post_residual_addition=deepstack_embeds,
+                )
 
         # Handle deepstack for the last processed layer if it exists.
         last_deepstack = self.get_deepstack_embeds(
