@@ -61,27 +61,28 @@ class GathererTensorAddress:
 
 
 @torch.jit.script
-def cast_tensor_to_int32(tensor: torch.Tensor) -> torch.Tensor:
-    if tensor.dtype == torch.int64:
-        x = tensor.to(torch.int64)
+def cast_tensor_to_int32(x: torch.Tensor) -> torch.Tensor:
+    if x.dtype == torch.int64:
         low = (x & 0xFFFFFFFF).to(torch.int32)
         high = ((x >> 32) & 0xFFFFFFFF).to(torch.int32)
         packed = torch.stack((low, high), dim=-1)
         return packed.reshape(-1)
+    elif x.dtype == torch.float32:
+        return x.view(torch.int32)  # basically re-interpret the data
     else:
-        return tensor.to(torch.int32, non_blocking=True)
+        return x.to(torch.int32, non_blocking=True)
 
 
 @torch.jit.script
-def cast_tensor_from_int32(
-    tensor: torch.Tensor, original_dtype: torch.dtype
-) -> torch.Tensor:
+def cast_tensor_from_int32(x: torch.Tensor, original_dtype: torch.dtype) -> torch.Tensor:
     if original_dtype == torch.int64:
-        low = tensor[0::2].to(torch.int64) & 0xFFFFFFFF
-        high = tensor[1::2].to(torch.int64) & 0xFFFFFFFF
+        low = x[0::2].to(torch.int64) & 0xFFFFFFFF
+        high = x[1::2].to(torch.int64) & 0xFFFFFFFF
         return low | (high << 32)
+    if original_dtype == torch.float32:
+        return x.view(original_dtype)  # basically re-interpret the data
     else:
-        return tensor.to(original_dtype, non_blocking=True)
+        return x.to(original_dtype, non_blocking=True)
 
 
 class ExpertRecorderBuffer:
@@ -117,6 +118,10 @@ class ExpertRecorderBuffer:
         t = tensor.clone(memory_format=torch.contiguous_format).view(-1)
         t.record_stream(self._log_stream)  # keep tensor alive
 
+        # cast tensor if needed
+        if t.dtype != self._buffer.dtype:
+            t = cast_tensor_to_int32(t)
+
         # make sure previous copy is done
         self._log_ready.record(torch.cuda.current_stream())
 
@@ -124,10 +129,6 @@ class ExpertRecorderBuffer:
         with torch.cuda.stream(self._log_stream):
             # report event
             self._log_ready.wait(self._log_stream)
-
-            # cast tensor if needed
-            if t.dtype != self._buffer.dtype:
-                t = cast_tensor_to_int32(t)
 
             # compute dimensions
             length = t.numel()
