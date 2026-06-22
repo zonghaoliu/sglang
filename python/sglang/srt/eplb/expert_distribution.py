@@ -68,7 +68,7 @@ def cast_tensor_to_int32(x: torch.Tensor) -> torch.Tensor:
         packed = torch.stack((low, high), dim=-1)
         return packed.reshape(-1)
     elif x.dtype == torch.float32:
-        return x.view(torch.int32)  # basically re-interpret the data
+        return (x * 10000.0).to(torch.int32, non_blocking=True)
     else:
         return x.to(torch.int32, non_blocking=True)
 
@@ -80,7 +80,7 @@ def cast_tensor_from_int32(x: torch.Tensor, original_dtype: torch.dtype) -> torc
         high = x[1::2].to(torch.int64) & 0xFFFFFFFF
         return low | (high << 32)
     if original_dtype == torch.float32:
-        return x.view(original_dtype)  # basically re-interpret the data
+        return x.to(original_dtype, non_blocking=True) / 10000.0
     else:
         return x.to(original_dtype, non_blocking=True)
 
