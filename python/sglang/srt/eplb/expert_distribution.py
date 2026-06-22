@@ -234,6 +234,9 @@ class ExpertDistributionRecorder(ABC):
     def on_select_experts(self, topk_ids: torch.Tensor):
         pass
 
+    def on_select_weights(self, topk_weights: torch.Tensor):
+        pass
+
     def on_deepep_dispatch_normal(
         self,
         local_physical_count_of_layer: List[int],
@@ -347,6 +350,9 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
 
     def on_select_experts(self, topk_ids: torch.Tensor):
         self._on_hook("on_select_experts", topk_ids=topk_ids)
+
+    def on_select_weights(self, topk_weights: torch.Tensor):
+        self._on_hook("on_select_weights", topk_weights=topk_weights)
 
     def on_deepep_dispatch_normal(
         self,
@@ -490,6 +496,9 @@ class _SinglePassGatherer(ABC):
     def on_select_experts(self, layer_idx: int, topk_ids: torch.Tensor):
         pass
 
+    def on_select_weights(self, layer_idx: int, topk_weights: torch.Tensor):
+        pass
+
     def on_deepep_dispatch_normal(
         self,
         layer_idx: int,
@@ -535,6 +544,16 @@ class _BufferedDetailSinglePassGatherer(_SinglePassGatherer):
             dtype=torch.int32,
             device=server_args.device,
         )
+        self._topk_weights_of_layer = torch.zeros(
+            (
+                expert_location_metadata.num_layers,
+                # TODO determine the max number
+                server_args.chunked_prefill_size * 8,
+                self._TOP_K_NUM,
+            ),
+            dtype=torch.float32,
+            device=server_args.device,
+        )
         self._misc_objects: List[Dict[str, Any]] = []
         self._data = None
         assert (
@@ -556,6 +575,11 @@ class _BufferedDetailSinglePassGatherer(_SinglePassGatherer):
     def on_select_experts(self, layer_idx: int, topk_ids: torch.Tensor):
         self._topk_ids_of_layer[layer_idx, : topk_ids.shape[0], : topk_ids.shape[1]] = (
             topk_ids
+        )
+
+    def on_select_weights(self, layer_idx: int, topk_weights: torch.Tensor):
+        self._topk_weights_of_layer[layer_idx, : topk_weights.shape[0], : topk_weights.shape[1]] = (
+            topk_weights
         )
 
     def on_deepep_dispatch_normal(
@@ -580,6 +604,7 @@ class _BufferedDetailSinglePassGatherer(_SinglePassGatherer):
 
     def reset(self):
         self._topk_ids_of_layer[...] = -1
+        self._topk_weights_of_layer[...] = -1
         self._misc_objects.clear()
         self._metadata = None
 
@@ -597,6 +622,9 @@ class _BufferedDetailSinglePassGatherer(_SinglePassGatherer):
             **self._metadata,
             topk_ids_of_layer=self._data.store(
                 self._topk_ids_of_layer[:, :num_tokens, :]
+            ),
+            topk_weights_of_layer=self._data.store(
+                self._topk_weights_of_layer[:, :num_tokens, :]
             ),
             misc_objects=self._misc_objects,
             global_physical_count=self._data.store(global_physical_count),

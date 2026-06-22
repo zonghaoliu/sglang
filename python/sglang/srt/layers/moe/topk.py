@@ -1109,6 +1109,7 @@ def select_experts(
     )
 
     get_global_expert_distribution_recorder().on_select_experts(topk_ids=topk_ids)
+    get_global_expert_distribution_recorder().on_select_weights(topk_weights=topk_weights)
 
     return StandardTopKOutput(topk_weights, topk_ids, router_logits)
 
